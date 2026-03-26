@@ -1,3 +1,0 @@
-/home/jason/camera_calibration/build/CMakeFiles/calibrate.dir
-/home/jason/camera_calibration/build/CMakeFiles/edit_cache.dir
-/home/jason/camera_calibration/build/CMakeFiles/rebuild_cache.dir
