@@ -2,6 +2,8 @@
 #include <vector>
 #include <string>
 #include <filesystem>
+#include <sstream>
+#include <iomanip>
 #include <opencv2/opencv.hpp>
 
 namespace fs = std::filesystem;
@@ -93,6 +95,92 @@ int main() {
     // 4. 印出結果
     std::cout << "=== 內參矩陣 (K) ===\n" << cameraMatrix << "\n\n";
     std::cout << "=== 畸變係數 (k1 k2 p1 p2 k3) ===\n" << distCoeffs << "\n\n";
+
+    // 5. 計算並印出每張圖的 RPE
+    std::cout << "\n=== 每張圖的重投影誤差 ===\n";
+    std::vector<double> perImageRPE;
+
+    for (int i = 0; i < (int)objPoints.size(); i++) {
+        std::vector<cv::Point2f> reprojected;
+        cv::projectPoints(objPoints[i], rvecs[i], tvecs[i],
+                          cameraMatrix, distCoeffs, reprojected);
+
+        double err = 0;
+        for (int j = 0; j < (int)reprojected.size(); j++) {
+            double dx = reprojected[j].x - imgPoints[i][j].x;
+            double dy = reprojected[j].y - imgPoints[i][j].y;
+            err += std::sqrt(dx*dx + dy*dy);
+        }
+        err /= reprojected.size();
+        perImageRPE.push_back(err);
+
+        std::string fname = fs::path(paths[i]).filename().string();
+        std::cout << "  " << fname << ": " << err << " px";
+        if (err > 1.0) std::cout << "  ← 品質差";
+        std::cout << "\n";
+    }
+
+    // 畫長條圖
+    int barW = 60, barH = 400;
+    int margin = 60;
+    int imgW = margin + (int)perImageRPE.size() * (barW + 10) + margin;
+    int imgH = barH + margin * 2;
+    cv::Mat chart(imgH, imgW, CV_8UC3, cv::Scalar(245, 245, 245));
+
+    // 找最大值，用來決定 Y 軸比例
+    double maxRPE = *std::max_element(perImageRPE.begin(), perImageRPE.end());
+    maxRPE = std::max(maxRPE, 1.0);  // 最少畫到 1.0px
+
+    // 畫 Y 軸基準線（1.0px 品質門檻）
+    int threshY = imgH - margin - (int)(1.0 / maxRPE * barH);
+    cv::line(chart,
+        {margin, threshY},
+        {imgW - margin, threshY},
+        cv::Scalar(200, 80, 80), 1, cv::LINE_AA);
+    cv::putText(chart, "1.0px threshold",
+        {margin + 4, threshY - 6},
+        cv::FONT_HERSHEY_SIMPLEX, 0.4,
+        cv::Scalar(200, 80, 80), 1);
+
+    // 畫每張圖的長條
+    for (int i = 0; i < (int)perImageRPE.size(); i++) {
+        int x = margin + i * (barW + 10);
+        int h = (int)(perImageRPE[i] / maxRPE * barH);
+        int y = imgH - margin - h;
+
+        // 超過 1.0px 用紅色，否則用綠色
+        cv::Scalar color = (perImageRPE[i] > 1.0)
+            ? cv::Scalar(80, 80, 200)
+            : cv::Scalar(80, 180, 80);
+
+        cv::rectangle(chart,
+            cv::Point(x, y),
+            cv::Point(x + barW, imgH - margin),
+            color, -1);
+
+        // 數值標籤
+        std::ostringstream ss;
+        ss << std::fixed << std::setprecision(2) << perImageRPE[i];
+        cv::putText(chart, ss.str(),
+            {x + 4, y - 6},
+            cv::FONT_HERSHEY_SIMPLEX, 0.38,
+            cv::Scalar(50, 50, 50), 1);
+
+        // 圖片編號
+        cv::putText(chart, std::to_string(i+1),
+            {x + barW/2 - 6, imgH - margin + 18},
+            cv::FONT_HERSHEY_SIMPLEX, 0.4,
+            cv::Scalar(80, 80, 80), 1);
+    }
+
+    // 標題
+    cv::putText(chart, "Reprojection Error per Image (px)",
+        {margin, 30},
+        cv::FONT_HERSHEY_SIMPLEX, 0.6,
+        cv::Scalar(40, 40, 40), 1);
+
+    cv::imwrite("../rpe_per_image.png", chart);
+    std::cout << "\n長條圖已儲存至: rpe_per_image.png\n";
 
     // 5. 存成 YAML
     cv::FileStorage fs_out(OUTPUT, cv::FileStorage::WRITE);
