@@ -8,39 +8,101 @@
 
 namespace fs = std::filesystem;
 
-// ─── 設定區（只需要改這裡）──────────────────────────
-const int   BOARD_W      = 9;
-const int   BOARD_H      = 6;
-const float SQUARE_SIZE  = 25.0f;
-const std::string IMAGE_DIR = "../images";
-const std::string OUTPUT    = "../calib_result.yaml";
+// ─── 預設設定 ────────────────────────────────────────
+const int   DEFAULT_BOARD_W     = 9;
+const int   DEFAULT_BOARD_H     = 6;
+const float DEFAULT_SQUARE_SIZE = 25.0f;  // mm
+const std::string DEFAULT_IMAGE_DIR = "../images";
+const std::string DEFAULT_OUTPUT    = "../calib_result.yaml";
+
+// 角點亞像素精修參數
+const int    SUBPIX_WIN_SIZE = 11;
+const int    SUBPIX_MAX_ITER = 30;
+const double SUBPIX_EPS      = 0.001;
+
+// RPE 品質閾值
+const double RPE_QUALITY_THRESHOLD = 1.0;  // px
 // ────────────────────────────────────────────────────
+
+static void printUsage(const char* prog) {
+    std::cout << "用法: " << prog << " [OPTIONS]\n"
+              << "  --fisheye           使用魚眼相機模型\n"
+              << "  --dir <path>        圖片目錄 (預設: " << DEFAULT_IMAGE_DIR << ")\n"
+              << "  --output <path>     輸出 YAML 路徑 (預設: " << DEFAULT_OUTPUT << ")\n"
+              << "  --board <WxH>       棋盤格內角點數 (預設: 9x6)\n"
+              << "  --square <mm>       棋盤格方格邊長 (預設: 25.0 mm)\n"
+              << "  --help              顯示說明\n";
+}
 
 int main(int argc, char* argv[]) {
     // 解析命令列參數
     bool useFisheye = false;
+    std::string imageDir = DEFAULT_IMAGE_DIR;
+    std::string outputPath = DEFAULT_OUTPUT;
+    int boardW = DEFAULT_BOARD_W;
+    int boardH = DEFAULT_BOARD_H;
+    float squareSize = DEFAULT_SQUARE_SIZE;
+
     for (int i = 1; i < argc; i++) {
-        if (std::string(argv[i]) == "--fisheye")
+        std::string arg(argv[i]);
+        if (arg == "--fisheye") {
             useFisheye = true;
+        } else if (arg == "--dir" && i + 1 < argc) {
+            imageDir = argv[++i];
+        } else if (arg == "--output" && i + 1 < argc) {
+            outputPath = argv[++i];
+        } else if (arg == "--board" && i + 1 < argc) {
+            std::string dim = argv[++i];
+            auto xpos = dim.find('x');
+            if (xpos != std::string::npos) {
+                boardW = std::stoi(dim.substr(0, xpos));
+                boardH = std::stoi(dim.substr(xpos + 1));
+            }
+        } else if (arg == "--square" && i + 1 < argc) {
+            squareSize = std::stof(argv[++i]);
+        } else if (arg == "--help") {
+            printUsage(argv[0]);
+            return 0;
+        }
     }
+
+    // 參數驗證
+    if (boardW < 3 || boardH < 3) {
+        std::cerr << "錯誤：棋盤格尺寸必須 >= 3x3 (目前: "
+                  << boardW << "x" << boardH << ")\n";
+        return 1;
+    }
+    if (squareSize <= 0) {
+        std::cerr << "錯誤：方格邊長必須 > 0 (目前: " << squareSize << ")\n";
+        return 1;
+    }
+
     std::cout << "校正模式: "
               << (useFisheye ? "魚眼 (fisheye)" : "標準 (standard)") << "\n";
+    std::cout << "圖片目錄: " << imageDir << "\n";
+    std::cout << "棋盤格:   " << boardW << "x" << boardH
+              << " (方格 " << squareSize << " mm)\n\n";
 
-    cv::Size boardSize(BOARD_W, BOARD_H);
+    cv::Size boardSize(boardW, boardH);
 
     // 1. 建立理想 3D 角點座標
     std::vector<cv::Point3f> objTemplate;
-    for (int r = 0; r < BOARD_H; r++)
-        for (int c = 0; c < BOARD_W; c++)
-            objTemplate.emplace_back(c * SQUARE_SIZE,
-                                     r * SQUARE_SIZE, 0.0f);
+    for (int r = 0; r < boardH; r++)
+        for (int c = 0; c < boardW; c++)
+            objTemplate.emplace_back(c * squareSize,
+                                     r * squareSize, 0.0f);
 
     std::vector<std::vector<cv::Point3f>> objPoints;
     std::vector<std::vector<cv::Point2f>> imgPoints;
 
     // 2. 讀取圖片，找角點
+    if (!fs::exists(imageDir) || !fs::is_directory(imageDir)) {
+        std::cerr << "錯誤：找不到圖片目錄 " << imageDir << "\n";
+        return 1;
+    }
+
     std::vector<std::string> paths;
-    for (auto& entry : fs::directory_iterator(IMAGE_DIR)) {
+    for (auto& entry : fs::directory_iterator(imageDir)) {
         std::string ext = entry.path().extension().string();
         if (ext == ".jpg" || ext == ".png" || ext == ".jpeg")
             paths.push_back(entry.path().string());
@@ -48,7 +110,7 @@ int main(int argc, char* argv[]) {
     std::sort(paths.begin(), paths.end());
 
     if (paths.empty()) {
-        std::cerr << "錯誤：images/ 資料夾裡沒有圖片！\n";
+        std::cerr << "錯誤：" << imageDir << " 裡沒有圖片！\n";
         return 1;
     }
 
@@ -73,9 +135,12 @@ int main(int argc, char* argv[]) {
             cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE);
 
         if (found) {
-            cv::cornerSubPix(gray, corners, cv::Size(11, 11), cv::Size(-1, -1),
+            cv::cornerSubPix(gray, corners,
+                cv::Size(SUBPIX_WIN_SIZE, SUBPIX_WIN_SIZE),
+                cv::Size(-1, -1),
                 cv::TermCriteria(cv::TermCriteria::EPS +
-                                 cv::TermCriteria::MAX_ITER, 30, 0.001));
+                                 cv::TermCriteria::MAX_ITER,
+                                 SUBPIX_MAX_ITER, SUBPIX_EPS));
             objPoints.push_back(objTemplate);
             imgPoints.push_back(corners);
             successCount++;
@@ -113,7 +178,8 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "重投影誤差 (RPE): " << rpe << " px\n";
-    std::cout << "(RPE < 1.0 代表校正品質良好)\n\n";
+    std::cout << "(RPE < " << RPE_QUALITY_THRESHOLD
+              << " 代表校正品質良好)\n\n";
     std::cout << "=== 內參矩陣 (K) ===\n" << cameraMatrix << "\n\n";
     std::cout << "=== 畸變係數 ===\n" << distCoeffs << "\n\n";
 
@@ -141,97 +207,112 @@ int main(int argc, char* argv[]) {
         err /= reprojected.size();
         perImageRPE.push_back(err);
 
-        std::string fname = fs::path(paths[i]).filename().string();
-        std::cout << "  " << fname << ": " << err << " px";
-        if (err > 1.0) std::cout << "  ← 品質差";
+        // 使用偵測成功的圖片檔名（不是全部 paths）
+        std::cout << "  Image " << (i+1) << ": " << err << " px";
+        if (err > RPE_QUALITY_THRESHOLD) std::cout << "  ← 品質差";
         std::cout << "\n";
     }
 
     // 畫長條圖
-    int barW = 60, barH = 400, margin = 60;
-    int imgW = margin + (int)perImageRPE.size() * (barW + 10) + margin;
-    int imgH = barH + margin * 2;
-    cv::Mat chart(imgH, imgW, CV_8UC3, cv::Scalar(245, 245, 245));
+    if (!perImageRPE.empty()) {
+        int barW = 60, barH = 400, margin = 60;
+        int imgW = margin + (int)perImageRPE.size() * (barW + 10) + margin;
+        int imgH = barH + margin * 2;
+        cv::Mat chart(imgH, imgW, CV_8UC3, cv::Scalar(245, 245, 245));
 
-    double maxRPE = *std::max_element(perImageRPE.begin(), perImageRPE.end());
-    maxRPE = std::max(maxRPE, 1.0);
+        double maxRPE = *std::max_element(perImageRPE.begin(), perImageRPE.end());
+        maxRPE = std::max(maxRPE, RPE_QUALITY_THRESHOLD);
 
-    int threshY = imgH - margin - (int)(1.0 / maxRPE * barH);
-    cv::line(chart, {margin, threshY}, {imgW - margin, threshY},
-        cv::Scalar(200, 80, 80), 1, cv::LINE_AA);
-    cv::putText(chart, "1.0px threshold", {margin + 4, threshY - 6},
-        cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(200, 80, 80), 1);
+        int threshY = imgH - margin - (int)(RPE_QUALITY_THRESHOLD / maxRPE * barH);
+        cv::line(chart, {margin, threshY}, {imgW - margin, threshY},
+            cv::Scalar(200, 80, 80), 1, cv::LINE_AA);
+        cv::putText(chart, std::to_string((int)RPE_QUALITY_THRESHOLD) + ".0px threshold",
+            {margin + 4, threshY - 6},
+            cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(200, 80, 80), 1);
 
-    for (int i = 0; i < (int)perImageRPE.size(); i++) {
-        int x = margin + i * (barW + 10);
-        int h = (int)(perImageRPE[i] / maxRPE * barH);
-        int y = imgH - margin - h;
+        for (int i = 0; i < (int)perImageRPE.size(); i++) {
+            int x = margin + i * (barW + 10);
+            int h = (int)(perImageRPE[i] / maxRPE * barH);
+            int y = imgH - margin - h;
 
-        cv::Scalar color = (perImageRPE[i] > 1.0)
-            ? cv::Scalar(80, 80, 200)
-            : cv::Scalar(80, 180, 80);
+            cv::Scalar color = (perImageRPE[i] > RPE_QUALITY_THRESHOLD)
+                ? cv::Scalar(80, 80, 200)
+                : cv::Scalar(80, 180, 80);
 
-        cv::rectangle(chart,
-            cv::Point(x, y), cv::Point(x + barW, imgH - margin),
-            color, -1);
+            cv::rectangle(chart,
+                cv::Point(x, y), cv::Point(x + barW, imgH - margin),
+                color, -1);
 
-        std::ostringstream ss;
-        ss << std::fixed << std::setprecision(2) << perImageRPE[i];
-        cv::putText(chart, ss.str(), {x + 4, y - 6},
-            cv::FONT_HERSHEY_SIMPLEX, 0.38, cv::Scalar(50, 50, 50), 1);
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(2) << perImageRPE[i];
+            cv::putText(chart, ss.str(), {x + 4, y - 6},
+                cv::FONT_HERSHEY_SIMPLEX, 0.38, cv::Scalar(50, 50, 50), 1);
 
-        cv::putText(chart, std::to_string(i+1),
-            {x + barW/2 - 6, imgH - margin + 18},
-            cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(80, 80, 80), 1);
+            cv::putText(chart, std::to_string(i+1),
+                {x + barW/2 - 6, imgH - margin + 18},
+                cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(80, 80, 80), 1);
+        }
+
+        std::string chartTitle = std::string("RPE per Image - ") +
+                                 (useFisheye ? "Fisheye" : "Standard") + " model (px)";
+        cv::putText(chart, chartTitle, {margin, 30},
+            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(40, 40, 40), 1);
+
+        // 輸出目錄 = outputPath 的父目錄
+        std::string outDir = fs::path(outputPath).parent_path().string();
+        if (outDir.empty()) outDir = ".";
+        std::string chartPath = outDir + "/" +
+            (useFisheye ? "rpe_fisheye.png" : "rpe_per_image.png");
+        cv::imwrite(chartPath, chart);
+        std::cout << "\n長條圖已儲存至: " << chartPath << "\n";
     }
 
-    std::string chartTitle = std::string("RPE per Image - ") +
-                             (useFisheye ? "Fisheye" : "Standard") + " model (px)";
-    cv::putText(chart, chartTitle, {margin, 30},
-        cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(40, 40, 40), 1);
-
-    std::string chartPath = useFisheye
-        ? "../rpe_fisheye.png" : "../rpe_per_image.png";
-    cv::imwrite(chartPath, chart);
-    std::cout << "\n長條圖已儲存至: " << chartPath << "\n";
-
     // 5. 存成 YAML
-    cv::FileStorage fs_out(OUTPUT, cv::FileStorage::WRITE);
+    cv::FileStorage fs_out(outputPath, cv::FileStorage::WRITE);
     fs_out << "image_width"        << imgSize.width;
     fs_out << "image_height"       << imgSize.height;
+    fs_out << "board_size"         << boardSize;
+    fs_out << "square_size"        << squareSize;
     fs_out << "model"              << (useFisheye ? "fisheye" : "standard");
     fs_out << "camera_matrix"      << cameraMatrix;
     fs_out << "dist_coeffs"        << distCoeffs;
     fs_out << "reprojection_error" << rpe;
     fs_out.release();
-    std::cout << "結果已儲存至: " << OUTPUT << "\n";
+    std::cout << "結果已儲存至: " << outputPath << "\n";
 
     // 6. 輸出校正前後對比圖
-    cv::Mat sample = cv::imread(paths[0]);
-    cv::Mat undistorted;
+    if (!paths.empty()) {
+        cv::Mat sample = cv::imread(paths[0]);
+        if (!sample.empty()) {
+            cv::Mat undistorted;
 
-    if (useFisheye) {
-        cv::Mat newK;
-        cv::fisheye::estimateNewCameraMatrixForUndistortRectify(
-            cameraMatrix, distCoeffs, imgSize,
-            cv::Matx33d::eye(), newK);
-        cv::fisheye::undistortImage(sample, undistorted,
-            cameraMatrix, distCoeffs, newK);
-    } else {
-        cv::undistort(sample, undistorted, cameraMatrix, distCoeffs);
+            if (useFisheye) {
+                cv::Mat newK;
+                cv::fisheye::estimateNewCameraMatrixForUndistortRectify(
+                    cameraMatrix, distCoeffs, imgSize,
+                    cv::Matx33d::eye(), newK);
+                cv::fisheye::undistortImage(sample, undistorted,
+                    cameraMatrix, distCoeffs, newK);
+            } else {
+                cv::undistort(sample, undistorted, cameraMatrix, distCoeffs);
+            }
+
+            cv::Mat comparison;
+            cv::hconcat(sample, undistorted, comparison);
+            cv::putText(comparison, "Before",
+                cv::Point(20, 40), cv::FONT_HERSHEY_SIMPLEX,
+                1.2, cv::Scalar(0, 0, 255), 2);
+            cv::putText(comparison, "After (undistorted)",
+                cv::Point(sample.cols + 20, 40), cv::FONT_HERSHEY_SIMPLEX,
+                1.2, cv::Scalar(0, 255, 0), 2);
+
+            std::string outDir = fs::path(outputPath).parent_path().string();
+            if (outDir.empty()) outDir = ".";
+            std::string compPath = outDir + "/comparison.jpg";
+            cv::imwrite(compPath, comparison);
+            std::cout << "對比圖已儲存至: " << compPath << "\n";
+        }
     }
-
-    cv::Mat comparison;
-    cv::hconcat(sample, undistorted, comparison);
-    cv::putText(comparison, "Before",
-        cv::Point(20, 40), cv::FONT_HERSHEY_SIMPLEX,
-        1.2, cv::Scalar(0, 0, 255), 2);
-    cv::putText(comparison, "After (undistorted)",
-        cv::Point(sample.cols + 20, 40), cv::FONT_HERSHEY_SIMPLEX,
-        1.2, cv::Scalar(0, 255, 0), 2);
-
-    cv::imwrite("../comparison.jpg", comparison);
-    std::cout << "對比圖已儲存至: comparison.jpg\n";
 
     return 0;
 }

@@ -25,8 +25,12 @@ Standard model fits better for this dataset (non-fisheye lens).
 
 ## Usage
 ```bash
-./calibrate              # standard model (default)
-./calibrate --fisheye    # fisheye model (AVM cameras)
+./calibrate                          # standard model (default)
+./calibrate --fisheye                # fisheye model (AVM cameras)
+./calibrate --dir /path/to/images    # custom image directory
+./calibrate --board 7x5              # custom board size
+./calibrate --square 30.0            # custom square size (mm)
+./calibrate --output result.yaml     # custom output path
 ```
 
 ## Pipeline
@@ -71,9 +75,20 @@ make
 | `rpe_per_image.png` | Per-image RPE — standard model |
 | `rpe_fisheye.png` | Per-image RPE — fisheye model |
 
+## Limitations
+
+- Chessboard must be **fully visible** in each image (partial boards are rejected)
+- At least **4 successful detections** are required for calibration
+- `SQUARE_SIZE` is in millimeters; ensure it matches your physical board
+- For fisheye lenses with very strong distortion, corners near image edges may not be detected
+
 ## Environment
 
 - Language: C++17
 - Library: OpenCV 4.6.0
 - Build system: CMake
 - Platform: Linux (WSL2 / Ubuntu 22.04)
+
+## Related
+
+- AVM Pipeline (uses this tool's output): [avm-pipeline](https://github.com/jeason522/avm-pipeline)
